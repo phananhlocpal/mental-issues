@@ -1,0 +1,274 @@
+"""Heterogeneous graph construction for mental health detection.
+
+Node types:
+    0 – Document
+    1 – Word
+    2 – Medical Concept
+    3 – Symptom Category
+
+Edge types (as string keys):
+    ('document', 'contains',    'word')
+    ('word',     'co_occurs',   'word')
+    ('word',     'maps_to',     'medical_concept')
+    ('medical_concept', 'belongs_to', 'symptom_category')
+    ('medical_concept', 'related_to', 'medical_concept')
+"""
+from __future__ import annotations
+
+import pickle
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import torch
+from sklearn.feature_extraction.text import TfidfVectorizer
+from tqdm import tqdm
+
+from src.entity_extraction import (
+    ALL_CATEGORIES,
+    ALL_CONCEPTS,
+    LEXICON,
+    MedicalEntityExtractor,
+)
+from src.preprocessing import DomainDataset
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Graph data container
+# ──────────────────────────────────────────────────────────────────────────────
+
+class HeteroGraphData:
+    """Lightweight heterogeneous graph without PyG dependency at construction time."""
+
+    def __init__(self) -> None:
+        # Node index maps
+        self.doc_ids: list[int] = []          # original sample indices
+        self.word_vocab: dict[str, int] = {}  # word → word_node_idx
+        self.concept_vocab: dict[str, int] = {}  # concept → concept_node_idx
+        self.category_vocab: dict[str, int] = {}  # category → cat_node_idx
+
+        # Edge tensors  (src, dst, weight)
+        self.doc_word_edges: list[tuple[int, int, float]] = []
+        self.word_word_edges: list[tuple[int, int, float]] = []
+        self.word_concept_edges: list[tuple[int, int, float]] = []
+        self.concept_category_edges: list[tuple[int, int, float]] = []
+        self.concept_concept_edges: list[tuple[int, int, float]] = []
+
+        # Labels / domain per document node
+        self.labels: list[int] = []
+        self.domain_ids: list[int] = []
+
+    # ------------------------------------------------------------------
+    @property
+    def num_docs(self) -> int:
+        return len(self.doc_ids)
+
+    @property
+    def num_words(self) -> int:
+        return len(self.word_vocab)
+
+    @property
+    def num_concepts(self) -> int:
+        return len(self.concept_vocab)
+
+    @property
+    def num_categories(self) -> int:
+        return len(self.category_vocab)
+
+    def summary(self) -> str:
+        return (
+            f"Nodes → docs:{self.num_docs}  words:{self.num_words}  "
+            f"concepts:{self.num_concepts}  categories:{self.num_categories}\n"
+            f"Edges → doc-word:{len(self.doc_word_edges)}  "
+            f"word-word:{len(self.word_word_edges)}  "
+            f"word-concept:{len(self.word_concept_edges)}  "
+            f"concept-cat:{len(self.concept_category_edges)}  "
+            f"concept-concept:{len(self.concept_concept_edges)}"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Builder
+# ──────────────────────────────────────────────────────────────────────────────
+
+class HeteroGraphBuilder:
+    """Build a HeteroGraphData from one or more DomainDataset objects."""
+
+    def __init__(self, config: dict) -> None:
+        self.cfg = config
+        self.window = config["preprocessing"]["co_occurrence_window"]
+        self.tfidf_top_k = config["preprocessing"]["tfidf_top_k"]
+        self.extractor = MedicalEntityExtractor()
+
+    # ------------------------------------------------------------------
+    def build(self, datasets: list[DomainDataset]) -> HeteroGraphData:
+        g = HeteroGraphData()
+
+        # ── 1. Vocabulary of all words across datasets ──────────────────
+        print("[Graph] Building vocabulary …")
+        word_freq: Counter = Counter()
+        all_token_lists: list[list[str]] = []
+        all_clean_texts: list[str] = []
+        all_labels: list[int] = []
+        all_domain_ids: list[int] = []
+
+        for ds in datasets:
+            for tokens, label, dom_id, ct in zip(
+                ds.tokens, ds.labels, ds.domain_ids, ds.clean_texts
+            ):
+                word_freq.update(tokens)
+                all_token_lists.append(tokens)
+                all_clean_texts.append(ct)
+                all_labels.append(label)
+                all_domain_ids.append(dom_id)
+
+        # Keep words with freq ≥ 2, then re-index from 0 (no gaps)
+        filtered_words = [w for w, c in word_freq.items() if c >= 2]
+        vocab = {w: i for i, w in enumerate(filtered_words)}
+        g.word_vocab = vocab
+
+        # ── 2. Concept & category vocabs ────────────────────────────────
+        g.concept_vocab = {c: i for i, c in enumerate(ALL_CONCEPTS)}
+        g.category_vocab = {cat: i for i, cat in enumerate(ALL_CATEGORIES)}
+
+        # ── 3. TF-IDF for doc-word edges ────────────────────────────────
+        print("[Graph] Computing TF-IDF doc-word edges …")
+        corpus = [" ".join(toks) for toks in all_token_lists]
+        tfidf = TfidfVectorizer(
+            vocabulary=vocab,
+            max_features=len(vocab),
+            sublinear_tf=True,
+        )
+        tfidf_matrix = tfidf.fit_transform(corpus)  # (N_docs, N_words)
+
+        for doc_idx in tqdm(range(len(corpus)), desc="  doc-word edges", leave=False):
+            g.doc_ids.append(doc_idx)
+            g.labels.append(all_labels[doc_idx])
+            g.domain_ids.append(all_domain_ids[doc_idx])
+            row = tfidf_matrix[doc_idx]
+            _, word_indices = row.nonzero()
+            if len(word_indices) == 0:
+                continue
+            # Keep top-k by TF-IDF score
+            scores = np.asarray(row[:, word_indices].todense()).flatten()
+            top_k = min(self.tfidf_top_k, len(scores))
+            top_idx = np.argsort(scores)[-top_k:]
+            for wi in word_indices[top_idx]:
+                g.doc_word_edges.append((doc_idx, int(wi), float(tfidf_matrix[doc_idx, wi])))
+
+        # ── 4. Word-word co-occurrence edges ────────────────────────────
+        print("[Graph] Building word-word co-occurrence edges …")
+        cooc: Counter = Counter()
+        for tokens in tqdm(all_token_lists, desc="  co-occurrence", leave=False):
+            token_ids = [vocab[t] for t in tokens if t in vocab]
+            for i, wi in enumerate(token_ids):
+                for wj in token_ids[i + 1 : i + 1 + self.window]:
+                    key = (min(wi, wj), max(wi, wj))
+                    cooc[key] += 1
+
+        for (wi, wj), cnt in cooc.items():
+            g.word_word_edges.append((wi, wj, float(cnt)))
+
+        # ── 5. Word-concept edges ────────────────────────────────────────
+        print("[Graph] Building word-concept edges …")
+        for surface, (concept, _) in LEXICON.items():
+            # Match surface word tokens to vocab
+            surface_tokens = surface.split()
+            for tok in surface_tokens:
+                if tok in vocab:
+                    wi = vocab[tok]
+                    ci = g.concept_vocab[concept]
+                    g.word_concept_edges.append((wi, ci, 1.0))
+
+        # ── 6. Concept-category edges ────────────────────────────────────
+        print("[Graph] Building concept-category edges …")
+        for surface, (concept, category) in LEXICON.items():
+            ci = g.concept_vocab[concept]
+            cati = g.category_vocab[category]
+            edge = (ci, cati, 1.0)
+            if edge not in g.concept_category_edges:
+                g.concept_category_edges.append(edge)
+
+        # ── 7. Concept-concept edges (same category) ─────────────────────
+        print("[Graph] Building concept-concept edges …")
+        cat_to_concepts: dict[str, list[int]] = defaultdict(list)
+        for surface, (concept, category) in LEXICON.items():
+            cat_to_concepts[category].append(g.concept_vocab[concept])
+
+        for cat, concept_indices in cat_to_concepts.items():
+            unique_ci = list(set(concept_indices))
+            for i, ci in enumerate(unique_ci):
+                for cj in unique_ci[i + 1 :]:
+                    g.concept_concept_edges.append((ci, cj, 1.0))
+
+        print("[Graph] Done!\n" + g.summary())
+        return g
+
+    # ------------------------------------------------------------------
+    def to_pyg(self, g: HeteroGraphData, device: torch.device | None = None):
+        """Convert HeteroGraphData to PyG HeteroData object."""
+        try:
+            from torch_geometric.data import HeteroData
+        except ImportError:
+            raise ImportError("torch-geometric is required for PyG conversion.")
+
+        data = HeteroData()
+
+        # ── Node feature placeholders (filled by embedding module) ──────
+        data["document"].num_nodes = g.num_docs
+        data["document"].y = torch.tensor(g.labels, dtype=torch.long)
+        data["document"].domain = torch.tensor(g.domain_ids, dtype=torch.long)
+
+        data["word"].num_nodes = g.num_words
+        data["medical_concept"].num_nodes = g.num_concepts
+        data["symptom_category"].num_nodes = g.num_categories
+
+        # ── Edges ────────────────────────────────────────────────────────
+        def make_edge(edges: list[tuple[int, int, float]]):
+            if not edges:
+                return torch.zeros(2, 0, dtype=torch.long), torch.zeros(0)
+            src = torch.tensor([e[0] for e in edges], dtype=torch.long)
+            dst = torch.tensor([e[1] for e in edges], dtype=torch.long)
+            wt = torch.tensor([e[2] for e in edges], dtype=torch.float)
+            return torch.stack([src, dst]), wt
+
+        data["document", "contains", "word"].edge_index, \
+            data["document", "contains", "word"].edge_weight = make_edge(g.doc_word_edges)
+
+        data["word", "co_occurs", "word"].edge_index, \
+            data["word", "co_occurs", "word"].edge_weight = make_edge(g.word_word_edges)
+
+        data["word", "maps_to", "medical_concept"].edge_index, \
+            data["word", "maps_to", "medical_concept"].edge_weight = make_edge(g.word_concept_edges)
+
+        data["medical_concept", "belongs_to", "symptom_category"].edge_index, \
+            data["medical_concept", "belongs_to", "symptom_category"].edge_weight = make_edge(
+                g.concept_category_edges
+            )
+
+        data["medical_concept", "related_to", "medical_concept"].edge_index, \
+            data["medical_concept", "related_to", "medical_concept"].edge_weight = make_edge(
+                g.concept_concept_edges
+            )
+
+        if device:
+            data = data.to(device)
+        return data
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Persistence
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_graph(graph: HeteroGraphData, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(graph, f)
+    print(f"  Graph saved → {path}")
+
+
+def load_graph(path: str | Path) -> HeteroGraphData:
+    with open(path, "rb") as f:
+        return pickle.load(f)

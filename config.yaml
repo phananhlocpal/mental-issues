@@ -1,0 +1,158 @@
+# Mental Health Detection – Configuration
+
+# ──────────────────────────────────────────
+# Data
+# ──────────────────────────────────────────
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  graph_dir: data/graphs
+  datasets:
+    - name: dreaddit
+      hf_name: dreaddit
+      label_col: label
+      text_col: text
+      domain_id: 0
+    - name: counseling
+      hf_name: Amod/mental_health_counseling_conversations
+      label_col: label
+      text_col: context
+      domain_id: 1
+
+# ──────────────────────────────────────────
+# Preprocessing
+# ──────────────────────────────────────────
+preprocessing:
+  max_length: 512
+  bert_model: bert-base-uncased
+  scibert_model: allenai/scibert_scivocab_uncased
+  glove_dim: 100
+  co_occurrence_window: 5
+  tfidf_top_k: 30          # top-k words per document for graph edges
+
+# ──────────────────────────────────────────
+# Knowledge Graph
+# ──────────────────────────────────────────
+knowledge:
+  use_umls: false           # set true if UMLS API key is available
+  symptom_keywords:
+    - insomnia
+    - fatigue
+    - anxiety
+    - depression
+    - hopeless
+    - worthless
+    - panic
+    - stress
+    - exhausted
+    - overwhelmed
+    - loneliness
+    - suicidal
+    - sadness
+    - numbness
+    - irritability
+  symptom_categories:
+    mood_disorder:
+      - depression
+      - hopeless
+      - worthless
+      - sadness
+      - numbness
+    anxiety_disorder:
+      - anxiety
+      - panic
+      - stress
+      - overwhelmed
+    sleep_disorder:
+      - insomnia
+      - exhausted
+      - fatigue
+    social_disorder:
+      - loneliness
+      - irritability
+    crisis:
+      - suicidal
+
+# ──────────────────────────────────────────
+# Graph Construction
+# ──────────────────────────────────────────
+graph:
+  node_types:
+    - document
+    - word
+    - medical_concept
+    - symptom_category
+  edge_types:
+    - [document, contains, word]
+    - [word, co_occurs, word]
+    - [word, maps_to, medical_concept]
+    - [medical_concept, belongs_to, symptom_category]
+    - [medical_concept, related_to, medical_concept]
+
+# ──────────────────────────────────────────
+# Node Embeddings
+# ──────────────────────────────────────────
+embeddings:
+  document_dim: 768        # SciBERT CLS token
+  word_dim: 100            # GloVe
+  concept_dim: 768         # BERT definition embedding
+  category_dim: 768        # mean of concept embeddings
+  projection_dim: 256      # common projection dim for all node types
+
+# ──────────────────────────────────────────
+# Model – HGNN
+# ──────────────────────────────────────────
+model:
+  hidden_dim: 128
+  num_heads: 8
+  num_layers: 2
+  dropout: 0.5
+  num_classes: 2
+  use_domain_adversarial: true
+
+# ──────────────────────────────────────────
+# Training
+# ──────────────────────────────────────────
+training:
+  learning_rate: 0.001
+  batch_size: 32
+  epochs: 50
+  domain_lambda: 0.1        # weight for domain adversarial loss
+  early_stopping_patience: 10
+  seed: 42
+  device: cuda               # cuda | cpu | mps
+
+# ──────────────────────────────────────────
+# Experiments
+# ──────────────────────────────────────────
+experiments:
+  log_dir: experiments/logs
+  result_dir: experiments/results
+  checkpoint_dir: experiments/checkpoints
+  run_in_domain: true
+  run_cross_domain: true
+  run_ablation: true
+  ablation_variants:
+    - full_model
+    - no_knowledge_graph
+    - no_domain_adversarial
+    - no_symptom_nodes
+
+# ──────────────────────────────────────────
+# Evaluation
+# ──────────────────────────────────────────
+evaluation:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
+  primary_metric: f1
+
+# ──────────────────────────────────────────
+# Explainability
+# ──────────────────────────────────────────
+explainability:
+  method: gnnexplainer
+  num_hops: 2
+  top_k_edges: 10
