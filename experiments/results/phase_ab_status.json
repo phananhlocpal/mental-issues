@@ -1,0 +1,13 @@
+{
+  "eda_outputs": {
+    "report_json": "C:\\Users\\Administrator\\Desktop\\mental-issues\\experiments\\results\\eda_report.json",
+    "summary_csv": "C:\\Users\\Administrator\\Desktop\\mental-issues\\experiments\\results\\eda_summary.csv"
+  },
+  "split_output": "C:\\Users\\Administrator\\Desktop\\mental-issues\\experiments\\results\\dreaddit_protocol_splits.json",
+  "split_sizes": {
+    "train_idx": 2536,
+    "val_idx": 282,
+    "test_idx": 715
+  },
+  "counseling_labeled": false
+}

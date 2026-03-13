@@ -1,0 +1,100 @@
+{
+  "max_length_results": [
+    {
+      "max_length": 64,
+      "train_size": 2537,
+      "test_size": 715,
+      "accuracy": 0.6951048951048951,
+      "f1_macro": 0.6938923802042419,
+      "f1_binary": 0.7131578947368421,
+      "recall_class1": 0.7344173441734417,
+      "delta_f1_binary_vs_512": -0.03229665071770338,
+      "delta_recall1_vs_512": -0.04336043360433606
+    },
+    {
+      "max_length": 128,
+      "train_size": 2537,
+      "test_size": 715,
+      "accuracy": 0.7230769230769231,
+      "f1_macro": 0.7216607946144893,
+      "f1_binary": 0.741514360313316,
+      "recall_class1": 0.7696476964769647,
+      "delta_f1_binary_vs_512": -0.003940185141229513,
+      "delta_recall1_vs_512": -0.008130081300813052
+    },
+    {
+      "max_length": 256,
+      "train_size": 2537,
+      "test_size": 715,
+      "accuracy": 0.7272727272727273,
+      "f1_macro": 0.7257081814408165,
+      "f1_binary": 0.7464239271781534,
+      "recall_class1": 0.7777777777777778,
+      "delta_f1_binary_vs_512": 0.0009693817236079427,
+      "delta_recall1_vs_512": 0.0
+    },
+    {
+      "max_length": 512,
+      "train_size": 2537,
+      "test_size": 715,
+      "accuracy": 0.7258741258741259,
+      "f1_macro": 0.7242424242424242,
+      "f1_binary": 0.7454545454545455,
+      "recall_class1": 0.7777777777777778,
+      "delta_f1_binary_vs_512": 0.0,
+      "delta_recall1_vs_512": 0.0
+    }
+  ],
+  "graph_param_results": [
+    {
+      "tfidf_top_k": 15,
+      "co_occurrence_window": 3,
+      "num_docs": 3534,
+      "num_words": 6285,
+      "doc_word_edges": 52607,
+      "word_word_edges": 479866,
+      "word_concept_edges": 46,
+      "build_time_s": 2.01
+    },
+    {
+      "tfidf_top_k": 30,
+      "co_occurrence_window": 5,
+      "num_docs": 3534,
+      "num_words": 6285,
+      "doc_word_edges": 95557,
+      "word_word_edges": 712324,
+      "word_concept_edges": 46,
+      "build_time_s": 2.53
+    },
+    {
+      "tfidf_top_k": 50,
+      "co_occurrence_window": 8,
+      "num_docs": 3534,
+      "num_words": 6285,
+      "doc_word_edges": 113586,
+      "word_word_edges": 988058,
+      "word_concept_edges": 46,
+      "build_time_s": 2.86
+    },
+    {
+      "tfidf_top_k": 30,
+      "co_occurrence_window": 8,
+      "num_docs": 3534,
+      "num_words": 6285,
+      "doc_word_edges": 95557,
+      "word_word_edges": 988058,
+      "word_concept_edges": 46,
+      "build_time_s": 2.74
+    },
+    {
+      "tfidf_top_k": 50,
+      "co_occurrence_window": 5,
+      "num_docs": 3534,
+      "num_words": 6285,
+      "doc_word_edges": 113586,
+      "word_word_edges": 712324,
+      "word_concept_edges": 46,
+      "build_time_s": 2.7
+    }
+  ]
+}

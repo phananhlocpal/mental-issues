@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from src.utils import set_seed
+from src.models import FocalLoss
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -72,6 +73,9 @@ class GNNTrainer:
         self.patience = tcfg["early_stopping_patience"]
         self.lr = tcfg["learning_rate"]
         self.use_full_graph_single_pass = tcfg.get("use_full_graph_single_pass", True)
+        # Phase D: optional focal loss for class-imbalanced datasets
+        self.use_focal_loss: bool = bool(tcfg.get("use_focal_loss", False))
+        self.focal_gamma: float = float(tcfg.get("focal_gamma", 2.0))
 
         self.optimizer = optim.Adam(model.parameters(), lr=self.lr)
         self.loss_fn = DomainAdversarialLoss(lam=self.lam)
@@ -92,24 +96,22 @@ class GNNTrainer:
 
     # ------------------------------------------------------------------
     def _configure_classification_loss(self, train_labels: torch.Tensor) -> None:
-        """Optionally set class-weighted CE loss from train-label distribution."""
-        if not self.use_class_weight:
-            self.loss_fn.cls_loss_fn = nn.CrossEntropyLoss()
-            return
-
-        if train_labels.numel() == 0:
-            self.loss_fn.cls_loss_fn = nn.CrossEntropyLoss()
-            return
-
+        """Set CE or Focal loss, optionally weighted by class frequency."""
         counts = torch.bincount(train_labels.long().cpu(), minlength=2).float()
-        if (counts <= 0).any():
-            # Avoid unstable weights when a class is absent.
-            self.loss_fn.cls_loss_fn = nn.CrossEntropyLoss()
-            return
+        valid_counts = (counts > 0).all()
 
-        total = counts.sum()
-        weights = total / (counts.numel() * counts)
-        self.loss_fn.cls_loss_fn = nn.CrossEntropyLoss(weight=weights.to(self.device))
+        if self.use_class_weight and valid_counts:
+            total = counts.sum()
+            weights = (total / (counts.numel() * counts)).to(self.device)
+        else:
+            weights = None
+
+        if self.use_focal_loss:
+            self.loss_fn.cls_loss_fn = FocalLoss(gamma=self.focal_gamma, weight=weights)
+        elif weights is not None:
+            self.loss_fn.cls_loss_fn = nn.CrossEntropyLoss(weight=weights)
+        else:
+            self.loss_fn.cls_loss_fn = nn.CrossEntropyLoss()
 
     # ------------------------------------------------------------------
     def _forward_batch(
@@ -332,6 +334,8 @@ class GNNTrainer:
     ) -> dict[str, float]:
         self.model.eval()
 
+        from src.evaluation.metrics import compute_metrics
+
         if self.use_full_graph_single_pass:
             batch_doc_idx = eval_indices.to(self.device)
             batch_labels = labels[eval_indices.cpu()].to(self.device)
@@ -343,20 +347,15 @@ class GNNTrainer:
                 alpha=0.0,
             )
             losses = self.loss_fn(out["logits"], batch_labels)
+            probs = torch.softmax(out["logits"], dim=-1)[:, 1].cpu().tolist()
             preds = out["logits"].argmax(dim=-1).cpu().tolist()
             y_true = batch_labels.cpu().tolist()
-
-            from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
-
-            return {
-                "loss": float(losses["total"].item()),
-                "accuracy": accuracy_score(y_true, preds),
-                "f1": f1_score(y_true, preds, average="binary", zero_division=0),
-                "precision": precision_score(y_true, preds, average="binary", zero_division=0),
-                "recall": recall_score(y_true, preds, average="binary", zero_division=0),
-            }
+            m = compute_metrics(y_true, preds, probs)
+            m["loss"] = float(losses["total"].item())
+            return m
 
         all_preds: list[int] = []
+        all_probs: list[float] = []
         all_labels: list[int] = []
         total_loss = 0.0
         n_batches = 0
@@ -374,26 +373,14 @@ class GNNTrainer:
             )
             losses = self.loss_fn(out["logits"], batch_labels)
             total_loss += losses["total"].item()
-            preds = out["logits"].argmax(dim=-1).cpu().tolist()
-            all_preds.extend(preds)
+            all_probs.extend(torch.softmax(out["logits"], dim=-1)[:, 1].cpu().tolist())
+            all_preds.extend(out["logits"].argmax(dim=-1).cpu().tolist())
             all_labels.extend(batch_labels.cpu().tolist())
             n_batches += 1
 
-        from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
-
-        acc = accuracy_score(all_labels, all_preds)
-        f1 = f1_score(all_labels, all_preds, average="binary", zero_division=0)
-        prec = precision_score(all_labels, all_preds, average="binary", zero_division=0)
-        rec = recall_score(all_labels, all_preds, average="binary", zero_division=0)
-
-        n_batches = max(1, n_batches)
-        return {
-            "loss": total_loss / n_batches,
-            "accuracy": acc,
-            "f1": f1,
-            "precision": prec,
-            "recall": rec,
-        }
+        m = compute_metrics(all_labels, all_preds, all_probs)
+        m["loss"] = total_loss / max(n_batches, 1)
+        return m
 
     # ------------------------------------------------------------------
     def fit(
@@ -431,6 +418,8 @@ class GNNTrainer:
                 "val_precision": round(val_stats["precision"], 4),
                 "val_recall": round(val_stats["recall"], 4),
                 "elapsed_s": round(elapsed, 2),
+                "domain_lambda": self.lam,
+                "use_focal_loss": self.use_focal_loss,
             }
             self.history.append(row)
 
@@ -507,6 +496,8 @@ class GNNTrainer:
                 "val_precision": round(val_stats["precision"], 4),
                 "val_recall": round(val_stats["recall"], 4),
                 "elapsed_s": round(elapsed, 2),
+                "domain_lambda": self.lam,
+                "use_focal_loss": self.use_focal_loss,
             }
             self.history.append(row)
 

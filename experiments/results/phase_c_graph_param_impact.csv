@@ -1,0 +1,6 @@
+tfidf_top_k,co_occurrence_window,num_docs,num_words,doc_word_edges,word_word_edges,word_concept_edges,build_time_s
+15,3,3534,6285,52607,479866,46,2.01
+30,5,3534,6285,95557,712324,46,2.53
+50,8,3534,6285,113586,988058,46,2.86
+30,8,3534,6285,95557,988058,46,2.74
+50,5,3534,6285,113586,712324,46,2.7

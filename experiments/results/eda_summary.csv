@@ -1,0 +1,4 @@
+dataset,rows,text_col,label_col,empty_after_clean,duplicate_clean_text,len_words_mean,len_words_median,len_words_p95
+dreaddit_train,2838,text,label,0,18,88.495,83.0,147.15
+dreaddit_test,715,text,label,0,0,88.284,84.0,148.0
+counseling,3512,Context,,0,2681,57.451,48.0,142.0

@@ -1,7 +1,7 @@
 """Node feature computation for the heterogeneous graph.
 
 Features:
-  - Document  : SciBERT CLS embedding (768-d) → projected to projection_dim
+  - Document  : SciBERT CLS embedding (768-d) + optional LIWC/DAL (33-d)
   - Word      : GloVe 100-d (or random init) → projected
   - Concept   : BERT definition embedding (768-d) → projected
   - Category  : mean of concept embeddings → projected
@@ -27,20 +27,65 @@ from src.preprocessing import DomainDataset
 # ──────────────────────────────────────────────────────────────────────────────
 
 class DocumentEmbedder:
-    """Encode documents with SciBERT CLS token."""
+    """Encode documents with transformer CLS token."""
 
     def __init__(
         self,
         model_name: str = "allenai/scibert_scivocab_uncased",
+        fallback_model_name: str = "bert-base-uncased",
         batch_size: int = 16,
         device: str = "cpu",
     ) -> None:
         self.batch_size = batch_size
         self.device = torch.device(device)
         print(f"  [DocumentEmbedder] Loading {model_name} …")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name).to(self.device)
+
+        # Prefer safetensors weights. If the primary model does not provide
+        # safetensors and torch is <2.6, fall back to a safe model.
+        self.tokenizer, self.model = self._load_model_with_fallback(
+            model_name=model_name,
+            fallback_model_name=fallback_model_name,
+        )
         self.model.eval()
+
+    def _load_model_with_fallback(
+        self,
+        model_name: str,
+        fallback_model_name: str,
+    ) -> tuple[AutoTokenizer, AutoModel]:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModel.from_pretrained(model_name, use_safetensors=True).to(self.device)
+            return tokenizer, model
+        except Exception as safe_err:
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(model_name)
+                model = AutoModel.from_pretrained(model_name).to(self.device)
+                return tokenizer, model
+            except ValueError as raw_err:
+                msg = str(raw_err)
+                if "upgrade torch to at least v2.6" not in msg:
+                    raise
+
+                print(
+                    "  [DocumentEmbedder] Current torch cannot load .bin checkpoints safely. "
+                    f"Falling back to {fallback_model_name} (safetensors)."
+                )
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(fallback_model_name)
+                    model = AutoModel.from_pretrained(
+                        fallback_model_name,
+                        use_safetensors=True,
+                    ).to(self.device)
+                    return tokenizer, model
+                except Exception as fallback_err:
+                    raise RuntimeError(
+                        "Unable to load document encoder safely. "
+                        "Upgrade torch to >=2.6, or set preprocessing.safe_fallback_model "
+                        "to a model with safetensors."
+                    ) from fallback_err
+            except Exception:
+                raise safe_err
 
     @torch.no_grad()
     def embed(self, texts: list[str]) -> torch.Tensor:
@@ -146,9 +191,14 @@ def build_node_features(
 
     doc_embedder = DocumentEmbedder(
         model_name=cfg_pre.get("scibert_model", "allenai/scibert_scivocab_uncased"),
+        fallback_model_name=cfg_pre.get("safe_fallback_model", "bert-base-uncased"),
         device=device,
     )
     doc_feats = doc_embedder.embed(all_raw_texts)  # (N_docs, 768)
+
+    # ── Optional LIWC / DAL feature fusion ────────────────────────────
+    if cfg_pre.get("use_liwc_features", False):
+        doc_feats = _fuse_liwc_features(doc_feats, datasets)
 
     # ── Word features (GloVe) ──────────────────────────────────────────
     glove_path = cfg_pre.get("glove_path", None)
@@ -179,3 +229,53 @@ def build_node_features(
         "medical_concept": concept_feats,
         "symptom_category": category_feats,
     }
+
+
+def _fuse_liwc_features(
+    doc_feats: torch.Tensor,
+    datasets: list[DomainDataset],
+) -> torch.Tensor:
+    """Concatenate normalised LIWC/DAL features to SciBERT document embeddings.
+
+    Datasets with no aux_features (e.g. counseling) are zero-padded to match
+    the LIWC dimension of the dreaddit rows.  A StandardScaler is fitted only
+    on rows that carry real LIWC data before concatenation.
+    """
+    from sklearn.preprocessing import StandardScaler  # lazy import
+
+    # Collect raw aux feature arrays
+    parts: list[torch.Tensor | None] = []
+    liwc_dim: int | None = None
+    for ds in datasets:
+        mat = getattr(ds, "aux_features", None)
+        if mat is not None:
+            t = torch.tensor(mat, dtype=torch.float32)
+            if liwc_dim is None:
+                liwc_dim = t.shape[1]
+            parts.append(t)
+        else:
+            parts.append(None)
+
+    if liwc_dim is None:
+        print("  [NodeFeatures] use_liwc_features=true but no aux_features found in any dataset.")
+        return doc_feats
+
+    # Fill missing datasets with zeros
+    filled: list[torch.Tensor] = [
+        p if p is not None else torch.zeros(len(ds), liwc_dim)
+        for p, ds in zip(parts, datasets)
+    ]
+    liwc_feats = torch.cat(filled, dim=0)  # (N_docs, liwc_dim)
+
+    # Fit StandardScaler on rows with real LIWC data (non-zero rows)
+    real_mask = torch.tensor([p is not None for p, ds in zip(parts, datasets)
+                               for _ in range(len(ds))], dtype=torch.bool)
+    liwc_np = liwc_feats.numpy().copy()
+    if real_mask.sum() > 0:
+        scaler = StandardScaler()
+        liwc_np[real_mask.numpy()] = scaler.fit_transform(liwc_np[real_mask.numpy()]).astype(np.float32)
+    liwc_feats = torch.tensor(liwc_np, dtype=torch.float32)
+
+    fused = torch.cat([doc_feats, liwc_feats], dim=1)
+    print(f"  [NodeFeatures] LIWC fusion: {doc_feats.shape[1]}-d + {liwc_dim}-d → {fused.shape[1]}-d")
+    return fused

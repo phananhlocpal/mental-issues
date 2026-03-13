@@ -1,24 +1,38 @@
 """__init__ for evaluation module."""
 from .metrics import (
     compute_metrics,
+    bootstrap_ci,
+    aggregate_seed_results,
+    format_mean_std_table,
     build_performance_table,
     print_performance_table,
     save_performance_table,
     plot_training_history,
     plot_confusion_matrix,
     plot_roc_curve,
+    plot_pr_curve,
+    plot_calibration_curve,
+    plot_multi_roc,
     error_analysis,
+    save_error_analysis,
     plot_tsne_embeddings,
 )
 
 __all__ = [
     "compute_metrics",
+    "bootstrap_ci",
+    "aggregate_seed_results",
+    "format_mean_std_table",
     "build_performance_table",
     "print_performance_table",
     "save_performance_table",
     "plot_training_history",
     "plot_confusion_matrix",
     "plot_roc_curve",
+    "plot_pr_curve",
+    "plot_calibration_curve",
+    "plot_multi_roc",
     "error_analysis",
+    "save_error_analysis",
     "plot_tsne_embeddings",
 ]

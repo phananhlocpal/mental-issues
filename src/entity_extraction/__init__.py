@@ -7,6 +7,7 @@ from .extractor import (
     LEXICON,
     ALL_CONCEPTS,
     ALL_CATEGORIES,
+    CONCEPT_RELATIONS,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "LEXICON",
     "ALL_CONCEPTS",
     "ALL_CATEGORIES",
+    "CONCEPT_RELATIONS",
 ]

@@ -3,11 +3,16 @@
 Since full UMLS integration requires an API key, we implement a
 rule-based extractor backed by a curated psychiatric keyword lexicon
 that maps surface forms to canonical concepts and symptom categories.
+
+Phase D additions:
+- Entity.confidence: extraction confidence score [0, 1].
+- CONCEPT_RELATIONS: typed semantic relations between concepts for richer graph edges.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 from transformers import AutoModel, AutoTokenizer
@@ -88,6 +93,48 @@ LEXICON: dict[str, tuple[str, str]] = {
 ALL_CONCEPTS: list[str] = sorted({v[0] for v in LEXICON.values()})
 ALL_CATEGORIES: list[str] = sorted({v[1] for v in LEXICON.values()})
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Semantic concept relations (Phase D)
+# Maps (concept_a, concept_b) → relation_type label (directed, a → b).
+# Used by graph builder to type concept-concept edges beyond "same-category".
+# ──────────────────────────────────────────────────────────────────────────────
+
+RelationType = Literal["comorbid", "implies", "triggers", "co_occurs"]
+
+CONCEPT_RELATIONS: dict[tuple[str, str], RelationType] = {
+    # depression frequently co-occurs with / implies other mood symptoms
+    ("depression", "hopelessness"):      "implies",
+    ("depression", "worthlessness"):     "implies",
+    ("depression", "emotional_numbness"): "co_occurs",
+    ("depression", "emptiness"):         "co_occurs",
+    ("depression", "sadness"):           "implies",
+    ("hopelessness", "suicidal_ideation"): "implies",
+    ("worthlessness", "suicidal_ideation"): "implies",
+    # anxiety triggers
+    ("anxiety", "panic_attack"):         "triggers",
+    ("stress", "anxiety"):               "triggers",
+    ("stress", "insomnia"):              "triggers",
+    ("stress", "fatigue"):               "triggers",
+    ("overwhelm", "anxiety"):            "co_occurs",
+    ("worry", "anxiety"):                "co_occurs",
+    ("nervousness", "anxiety"):          "co_occurs",
+    # sleep ↔ mood / energy
+    ("insomnia", "fatigue"):             "implies",
+    ("insomnia", "depression"):          "comorbid",
+    ("fatigue", "depression"):           "comorbid",
+    # social isolation risk chain
+    ("social_isolation", "loneliness"):  "implies",
+    ("loneliness", "depression"):        "comorbid",
+    ("social_withdrawal", "loneliness"): "implies",
+    # crisis relations
+    ("depression", "suicidal_ideation"): "triggers",
+    ("hopelessness", "self_harm"):       "triggers",
+    ("suicidal_ideation", "self_harm"):  "comorbid",
+    # irritability comorbidity
+    ("irritability", "anger"):           "co_occurs",
+    ("anger", "anxiety"):                "co_occurs",
+}
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data classes
@@ -100,6 +147,7 @@ class Entity:
     category: str         # symptom category
     start: int = 0
     end: int = 0
+    confidence: float = 1.0  # extraction confidence: 1.0 = exact, 0.8 = partial/lemma
 
 
 @dataclass
@@ -121,13 +169,15 @@ class ExtractionResult:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class MedicalEntityExtractor:
-    """Keyword-based psychiatric entity extractor."""
+    """Keyword-based psychiatric entity extractor with confidence scores."""
 
     def __init__(self) -> None:
         # Pre-compile sorted patterns (longest match first)
         sorted_keys = sorted(LEXICON.keys(), key=len, reverse=True)
         pattern = "|".join(re.escape(k) for k in sorted_keys)
         self._re = re.compile(pattern, re.IGNORECASE)
+        # Multi-token surfaces get lower confidence when matched partially
+        self._multi_token: set[str] = {k for k in LEXICON if " " in k}
 
     def extract(self, text: str) -> ExtractionResult:
         result = ExtractionResult(text=text)
@@ -137,6 +187,8 @@ class MedicalEntityExtractor:
             if surface not in seen:
                 seen.add(surface)
                 concept, category = LEXICON[surface]
+                # Confidence: 1.0 for exact single-token, 0.85 for multi-token phrase
+                confidence = 0.85 if surface in self._multi_token else 1.0
                 result.entities.append(
                     Entity(
                         surface=surface,
@@ -144,6 +196,7 @@ class MedicalEntityExtractor:
                         category=category,
                         start=match.start(),
                         end=match.end(),
+                        confidence=confidence,
                     )
                 )
         return result

@@ -143,12 +143,12 @@ def build_homo_graph(
     feat_parts: list[torch.Tensor] = []
     for nt in node_types:
         feat = node_feats[nt].float()
-        # Simple scaled projection (no learned weights — keeps baseline fair)
         if feat.shape[1] != proj_dim:
-            # Use mean-pooling / truncation for a parameter-free mapping
             if feat.shape[1] > proj_dim:
-                # Chunk-mean
-                feat = feat.view(feat.shape[0], proj_dim, -1).mean(-1)
+                # Adaptive average pool: works for any input dim
+                feat = torch.nn.functional.adaptive_avg_pool1d(
+                    feat.unsqueeze(0), proj_dim
+                ).squeeze(0)
             else:
                 # Zero-pad
                 pad = torch.zeros(feat.shape[0], proj_dim - feat.shape[1])

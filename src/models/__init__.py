@@ -1,5 +1,5 @@
 """__init__ for models module."""
-from .hgnn import MentalHealthGNN, BERTBaseline, GradientReversal, grad_reverse
+from .hgnn import FocalLoss, MentalHealthGNN, BERTBaseline, GradientReversal, grad_reverse
 from .baselines import (
     TFIDFBaseline,
     SciBERTMLPBaseline,
@@ -9,6 +9,7 @@ from .baselines import (
 )
 
 __all__ = [
+    "FocalLoss",
     "MentalHealthGNN",
     "BERTBaseline",
     "GradientReversal",

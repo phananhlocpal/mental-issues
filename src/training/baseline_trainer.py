@@ -178,6 +178,7 @@ class EmbeddingTrainer:
             edge_index = edge_index.to(self.device)
 
         all_preds: list[int] = []
+        all_probs: list[float] = []
         all_true: list[int] = []
         total_loss = 0.0
         n_batches = 0
@@ -189,13 +190,11 @@ class EmbeddingTrainer:
             logits = self._forward(x, edge_index, batch_idx)
             total_loss += self.loss_fn(logits, batch_lbl).item()
             n_batches += 1
+            all_probs.extend(torch.softmax(logits, dim=-1)[:, 1].cpu().tolist())
             all_preds.extend(logits.argmax(-1).cpu().tolist())
             all_true.extend(batch_lbl.cpu().tolist())
 
-        return {
-            "loss":      total_loss / max(n_batches, 1),
-            "accuracy":  accuracy_score(all_true, all_preds),
-            "precision": precision_score(all_true, all_preds, average="binary", zero_division=0),
-            "recall":    recall_score(all_true, all_preds, average="binary", zero_division=0),
-            "f1":        f1_score(all_true, all_preds, average="binary", zero_division=0),
-        }
+        from src.evaluation.metrics import compute_metrics
+        m = compute_metrics(all_true, all_preds, all_probs)
+        m["loss"] = total_loss / max(n_batches, 1)
+        return m

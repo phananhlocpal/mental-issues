@@ -22,6 +22,31 @@ except ImportError:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Focal Loss (Phase D) – helps with class-imbalanced stress detection
+# ──────────────────────────────────────────────────────────────────────────────
+
+class FocalLoss(nn.Module):
+    """Focal loss: down-weights easy examples so the model focuses on hard ones."""
+
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        weight: torch.Tensor | None = None,
+        reduction: str = "mean",
+    ) -> None:
+        super().__init__()
+        self.gamma = gamma
+        self.weight = weight
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce = F.cross_entropy(logits, targets, weight=self.weight, reduction="none")
+        pt = torch.exp(-ce)          # probability of the correct class
+        fl = (1.0 - pt) ** self.gamma * ce
+        return fl.mean() if self.reduction == "mean" else fl.sum()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Gradient Reversal Layer
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -133,7 +158,15 @@ class HGTEncoder(nn.Module):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class MentalHealthGNN(nn.Module):
-    """Complete HGNN model with optional domain adversarial head."""
+    """Complete HGNN model with optional domain adversarial head.
+
+    When ``use_skip_connection=True`` (default), the raw document features are
+    projected *independently* of the message-passing path and concatenated with
+    the GNN output before classification.  This residual path ensures that
+    informative initial document features (SciBERT + LIWC) are preserved even
+    if neighbourhood aggregation over randomly-initialised word nodes would
+    otherwise dilute them.
+    """
 
     def __init__(
         self,
@@ -145,10 +178,12 @@ class MentalHealthGNN(nn.Module):
         num_classes: int = 2,
         num_domains: int = 2,
         use_domain_adversarial: bool = True,
+        use_skip_connection: bool = True,
         metadata: tuple | None = None,
     ) -> None:
         super().__init__()
         self.use_domain_adversarial = use_domain_adversarial
+        self.use_skip_connection = use_skip_connection
 
         self.input_proj = InputProjection(input_dims, hidden_dim)
 
@@ -161,21 +196,33 @@ class MentalHealthGNN(nn.Module):
                 metadata=metadata,
             )
         else:
-            # Fallback: simple MLP on document features only
             self.encoder = None
+
+        # Skip-connection projection: raw doc features → hidden_dim
+        doc_in_dim = input_dims.get("document", hidden_dim)
+        if use_skip_connection:
+            self.doc_skip_proj = nn.Sequential(
+                nn.Linear(doc_in_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            )
+            classifier_in = 2 * hidden_dim
+        else:
+            self.doc_skip_proj = None
+            classifier_in = hidden_dim
 
         # Classification head
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(classifier_in, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, num_classes),
+            nn.Linear(hidden_dim, num_classes),
         )
 
         # Domain discriminator head
         if use_domain_adversarial:
             self.domain_classifier = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.Linear(classifier_in, hidden_dim // 2),
                 nn.ReLU(),
                 nn.Dropout(dropout),
                 nn.Linear(hidden_dim // 2, num_domains),
@@ -188,6 +235,9 @@ class MentalHealthGNN(nn.Module):
         doc_indices: torch.Tensor | None = None,
         alpha: float = 1.0,
     ) -> dict[str, torch.Tensor]:
+        # Store raw document features before any projection (for skip path)
+        raw_doc_x = x_dict["document"]  # (N_docs, doc_in_dim)
+
         # Project all node features to hidden_dim
         h = self.input_proj(x_dict)
 
@@ -199,6 +249,12 @@ class MentalHealthGNN(nn.Module):
         doc_h = h["document"]
         if doc_indices is not None:
             doc_h = doc_h[doc_indices]
+            raw_doc_x = raw_doc_x[doc_indices]
+
+        # Skip connection: concatenate GNN output with direct projection of raw features
+        if self.use_skip_connection and self.doc_skip_proj is not None:
+            skip_h = self.doc_skip_proj(raw_doc_x)
+            doc_h = torch.cat([doc_h, skip_h], dim=1)  # (N, 2*hidden_dim)
 
         # Classification
         logits = self.classifier(doc_h)

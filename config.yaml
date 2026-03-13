@@ -26,8 +26,11 @@ data_quality:
   enabled: true
   max_duplicate_ratio: 0.80
   max_empty_ratio: 0.05
+  max_dreaddit_train_test_overlap_ratio: 0.02
   deduplicate_clean_text: false
   allow_single_class_for:
+    - counseling
+  allow_unlabeled_for:
     - counseling
   require_binary_labels_for:
     - dreaddit_train
@@ -37,12 +40,22 @@ data_quality:
 # Preprocessing
 # ──────────────────────────────────────────
 preprocessing:
-  max_length: 512
+  max_length: 256
   bert_model: bert-base-uncased
   scibert_model: allenai/scibert_scivocab_uncased
   glove_dim: 100
   co_occurrence_window: 5
   tfidf_top_k: 30          # top-k words per document for graph edges
+  remove_stopwords: true
+  use_lemmatization: true
+  normalize_html: true
+  normalize_unicode: true
+  collapse_repeated_chars: true
+  repeated_char_max_run: 2
+  train_dedup_exact: true
+  train_dedup_near: false
+  train_dedup_near_threshold: 0.95
+  use_liwc_features: true             # append LIWC/DAL psycholinguistic features to document nodes
 
 # ──────────────────────────────────────────
 # Knowledge Graph
@@ -102,6 +115,10 @@ graph:
     - [word, maps_to, medical_concept]
     - [medical_concept, belongs_to, symptom_category]
     - [medical_concept, related_to, medical_concept]
+  # Phase D edge quality knobs
+  min_cooc_count: 1                   # drop word-word edges with count < this
+  normalize_doc_word_weights: true    # normalize TF-IDF doc-word weights per doc
+  min_entity_confidence: 0.5          # drop word-concept edges below this confidence
 
 # ──────────────────────────────────────────
 # Node Embeddings
@@ -122,7 +139,8 @@ model:
   num_layers: 2
   dropout: 0.5
   num_classes: 2
-  use_domain_adversarial: true
+  use_domain_adversarial: false   # DA gives 0 improvement (counseling has no labels)
+  use_skip_connection: true        # concat raw doc features with GNN output before classifier
 
 # ──────────────────────────────────────────
 # Training
@@ -137,6 +155,9 @@ training:
   early_stopping_patience: 10
   seed: 42
   device: cuda               # cuda | cpu | mps
+  # Phase D: focal loss for class-imbalanced mental-health datasets
+  use_focal_loss: false      # set true to replace CE with Focal loss
+  focal_gamma: 2.0           # focusing parameter; higher → more focus on hard examples
 
 # ──────────────────────────────────────────
 # Experiments

@@ -7,6 +7,7 @@ from .data_loader import (
     load_counseling,
     stratified_train_val_split_indices,
     build_dreaddit_protocol_splits,
+    save_protocol_splits,
     save_processed,
     load_processed,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "load_counseling",
     "stratified_train_val_split_indices",
     "build_dreaddit_protocol_splits",
+    "save_protocol_splits",
     "save_processed",
     "load_processed",
 ]

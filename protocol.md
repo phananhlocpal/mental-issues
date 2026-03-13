@@ -17,6 +17,7 @@ Applied at load time:
 3. Required datasets in `data_quality.require_binary_labels_for` must have labels in `{0, 1}`.
 4. Single-class datasets are only allowed if listed in `data_quality.allow_single_class_for`.
 5. Optional de-duplication can be enabled with `data_quality.deduplicate_clean_text`.
+6. Dreaddit train-test clean-text overlap must be <= `data_quality.max_dreaddit_train_test_overlap_ratio`.
 
 ## In-Domain Split (Official)
 1. Load both `dreaddit_train` and `dreaddit_test`.
@@ -50,3 +51,16 @@ Implementation helper:
 2. Version-locked dependencies.
 3. Saved split indices for each run.
 4. Saved best checkpoint with run metadata.
+
+## Phase A/B Finalization Command
+Run the following to regenerate EDA + official split artifacts:
+
+```powershell
+.venv\Scripts\python.exe scripts/run_phase_ab_checks.py
+```
+
+Expected outputs:
+1. `experiments/results/eda_report.json`
+2. `experiments/results/eda_summary.csv`
+3. `experiments/results/dreaddit_protocol_splits.json`
+4. `experiments/results/phase_ab_status.json`

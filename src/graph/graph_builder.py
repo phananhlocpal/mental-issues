@@ -28,6 +28,7 @@ from tqdm import tqdm
 from src.entity_extraction import (
     ALL_CATEGORIES,
     ALL_CONCEPTS,
+    CONCEPT_RELATIONS,
     LEXICON,
     MedicalEntityExtractor,
 )
@@ -54,6 +55,8 @@ class HeteroGraphData:
         self.word_concept_edges: list[tuple[int, int, float]] = []
         self.concept_category_edges: list[tuple[int, int, float]] = []
         self.concept_concept_edges: list[tuple[int, int, float]] = []
+        # Semantic relation type per concept-concept edge (Phase D)
+        self.concept_concept_relations: list[str] = []
 
         # Labels / domain per document node
         self.labels: list[int] = []
@@ -99,6 +102,13 @@ class HeteroGraphBuilder:
         self.cfg = config
         self.window = config["preprocessing"]["co_occurrence_window"]
         self.tfidf_top_k = config["preprocessing"]["tfidf_top_k"]
+        graph_cfg = config.get("graph", {})
+        # Minimum co-occurrence count to keep a word-word edge (sparsity filter)
+        self.min_cooc_count: int = int(graph_cfg.get("min_cooc_count", 2))
+        # Whether to L2-normalize doc-word edge weights per document row
+        self.normalize_doc_word: bool = bool(graph_cfg.get("normalize_doc_word_weights", True))
+        # Minimum entity confidence to create a word-concept edge
+        self.min_entity_confidence: float = float(graph_cfg.get("min_entity_confidence", 0.8))
         self.extractor = MedicalEntityExtractor()
 
     # ------------------------------------------------------------------
@@ -154,8 +164,11 @@ class HeteroGraphBuilder:
             scores = np.asarray(row[:, word_indices].todense()).flatten()
             top_k = min(self.tfidf_top_k, len(scores))
             top_idx = np.argsort(scores)[-top_k:]
-            for wi in word_indices[top_idx]:
-                g.doc_word_edges.append((doc_idx, int(wi), float(tfidf_matrix[doc_idx, wi])))
+            raw_weights = np.array([float(tfidf_matrix[doc_idx, word_indices[i]]) for i in top_idx])
+            if self.normalize_doc_word and raw_weights.max() > 0:
+                raw_weights = raw_weights / raw_weights.max()
+            for rank, wi in enumerate(word_indices[top_idx]):
+                g.doc_word_edges.append((doc_idx, int(wi), float(raw_weights[rank])))
 
         # ── 4. Word-word co-occurrence edges ────────────────────────────
         print("[Graph] Building word-word co-occurrence edges …")
@@ -167,25 +180,36 @@ class HeteroGraphBuilder:
                     key = (min(wi, wj), max(wi, wj))
                     cooc[key] += 1
 
+        max_cooc = max((v for v in cooc.values()), default=1)
         for (wi, wj), cnt in cooc.items():
-            # Add both directions so directed message passing remains symmetric.
-            g.word_word_edges.append((wi, wj, float(cnt)))
-            g.word_word_edges.append((wj, wi, float(cnt)))
+            if cnt < self.min_cooc_count:
+                continue
+            # Normalize count by max to [0,1] and add both directions
+            w = float(cnt) / float(max_cooc)
+            g.word_word_edges.append((wi, wj, w))
+            g.word_word_edges.append((wj, wi, w))
 
         # ── 5. Word-concept edges ────────────────────────────────────────
         print("[Graph] Building word-concept edges …")
         wc_edges: set[tuple[int, int]] = set()
 
         # Prefer corpus-driven extraction so graph edges reflect observed entities.
+        # Phase D: filter by entity confidence and weight edge by confidence.
         extraction_results = self.extractor.extract_batch(all_clean_texts)
+        wc_weighted: dict[tuple[int, int], float] = {}
         for res in extraction_results:
             for ent in res.entities:
                 if ent.concept not in g.concept_vocab:
                     continue
+                if ent.confidence < self.min_entity_confidence:
+                    continue
                 ci = g.concept_vocab[ent.concept]
                 for tok in ent.surface.split():
                     if tok in vocab:
-                        wc_edges.add((vocab[tok], ci))
+                        key = (vocab[tok], ci)
+                        # take max confidence across all mentions
+                        wc_weighted[key] = max(wc_weighted.get(key, 0.0), ent.confidence)
+                        wc_edges.add(key)
 
         # Fallback to lexicon priors if extraction is sparse.
         if not wc_edges:
@@ -197,7 +221,9 @@ class HeteroGraphBuilder:
                     if tok in vocab:
                         wc_edges.add((vocab[tok], ci))
 
-        g.word_concept_edges = [(wi, ci, 1.0) for wi, ci in sorted(wc_edges)]
+        g.word_concept_edges = [
+            (wi, ci, wc_weighted.get((wi, ci), 1.0)) for wi, ci in sorted(wc_edges)
+        ]
 
         # ── 6. Concept-category edges ────────────────────────────────────
         print("[Graph] Building concept-category edges …")
@@ -208,8 +234,22 @@ class HeteroGraphBuilder:
             if edge not in g.concept_category_edges:
                 g.concept_category_edges.append(edge)
 
-        # ── 7. Concept-concept edges (same category) ─────────────────────
-        print("[Graph] Building concept-concept edges …")
+        # ── 7. Concept-concept edges (typed semantic relations, Phase D) ───
+        print("[Graph] Building concept-concept edges (semantic relations) …")
+        added_pairs: set[tuple[int, int]] = set()
+
+        # Priority 1: explicit semantic relations from CONCEPT_RELATIONS
+        for (concept_a, concept_b), rel_type in CONCEPT_RELATIONS.items():
+            if concept_a not in g.concept_vocab or concept_b not in g.concept_vocab:
+                continue
+            ci = g.concept_vocab[concept_a]
+            cj = g.concept_vocab[concept_b]
+            # directional edge a→b with weight=1.0; mark both directions as seen
+            g.concept_concept_edges.append((ci, cj, 1.0))
+            g.concept_concept_relations.append(rel_type)
+            added_pairs.add((ci, cj))
+
+        # Priority 2: same-category fallback for pairs not in explicit relations
         cat_to_concepts: dict[str, list[int]] = defaultdict(list)
         for surface, (concept, category) in LEXICON.items():
             cat_to_concepts[category].append(g.concept_vocab[concept])
@@ -217,8 +257,11 @@ class HeteroGraphBuilder:
         for cat, concept_indices in cat_to_concepts.items():
             unique_ci = list(set(concept_indices))
             for i, ci in enumerate(unique_ci):
-                for cj in unique_ci[i + 1 :]:
-                    g.concept_concept_edges.append((ci, cj, 1.0))
+                for cj in unique_ci[i + 1:]:
+                    if (ci, cj) not in added_pairs:
+                        g.concept_concept_edges.append((ci, cj, 0.5))
+                        g.concept_concept_relations.append("same_category")
+                        added_pairs.add((ci, cj))
 
         print("[Graph] Done!\n" + g.summary())
         return g

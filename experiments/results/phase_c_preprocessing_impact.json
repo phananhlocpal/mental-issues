@@ -1,0 +1,86 @@
+[
+  {
+    "variant": "default",
+    "dreaddit_train_total": 2819,
+    "train_size": 2537,
+    "test_size": 715,
+    "accuracy": 0.7258741258741259,
+    "f1_macro": 0.7242424242424242,
+    "f1_binary": 0.7454545454545455,
+    "recall_class1": 0.7777777777777778,
+    "delta_f1_binary_vs_default": 0.0,
+    "delta_recall1_vs_default": 0.0
+  },
+  {
+    "variant": "no_stopword_removal",
+    "dreaddit_train_total": 2819,
+    "train_size": 2537,
+    "test_size": 715,
+    "accuracy": 0.7258741258741259,
+    "f1_macro": 0.7242424242424242,
+    "f1_binary": 0.7454545454545455,
+    "recall_class1": 0.7777777777777778,
+    "delta_f1_binary_vs_default": 0.0,
+    "delta_recall1_vs_default": 0.0
+  },
+  {
+    "variant": "no_lemmatization",
+    "dreaddit_train_total": 2819,
+    "train_size": 2537,
+    "test_size": 715,
+    "accuracy": 0.7258741258741259,
+    "f1_macro": 0.7242424242424242,
+    "f1_binary": 0.7454545454545455,
+    "recall_class1": 0.7777777777777778,
+    "delta_f1_binary_vs_default": 0.0,
+    "delta_recall1_vs_default": 0.0
+  },
+  {
+    "variant": "no_repeat_char_collapse",
+    "dreaddit_train_total": 2819,
+    "train_size": 2537,
+    "test_size": 715,
+    "accuracy": 0.7258741258741259,
+    "f1_macro": 0.7242424242424242,
+    "f1_binary": 0.7454545454545455,
+    "recall_class1": 0.7777777777777778,
+    "delta_f1_binary_vs_default": 0.0,
+    "delta_recall1_vs_default": 0.0
+  },
+  {
+    "variant": "near_dedup_093",
+    "dreaddit_train_total": 2818,
+    "train_size": 2536,
+    "test_size": 715,
+    "accuracy": 0.7272727272727273,
+    "f1_macro": 0.7260380294780526,
+    "f1_binary": 0.744429882044561,
+    "recall_class1": 0.7696476964769647,
+    "delta_f1_binary_vs_default": -0.0010246634099845275,
+    "delta_recall1_vs_default": -0.008130081300813052
+  },
+  {
+    "variant": "near_dedup_095",
+    "dreaddit_train_total": 2818,
+    "train_size": 2536,
+    "test_size": 715,
+    "accuracy": 0.7272727272727273,
+    "f1_macro": 0.7260380294780526,
+    "f1_binary": 0.744429882044561,
+    "recall_class1": 0.7696476964769647,
+    "delta_f1_binary_vs_default": -0.0010246634099845275,
+    "delta_recall1_vs_default": -0.008130081300813052
+  },
+  {
+    "variant": "near_dedup_090",
+    "dreaddit_train_total": 2817,
+    "train_size": 2535,
+    "test_size": 715,
+    "accuracy": 0.7188811188811188,
+    "f1_macro": 0.7173863026305698,
+    "f1_binary": 0.7379400260756193,
+    "recall_class1": 0.7669376693766937,
+    "delta_f1_binary_vs_default": -0.007514519378926221,
+    "delta_recall1_vs_default": -0.01084010840108407
+  }
+]
