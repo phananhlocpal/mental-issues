@@ -5,6 +5,8 @@ from .data_loader import (
     prepare_all_datasets,
     load_dreaddit,
     load_counseling,
+    stratified_train_val_split_indices,
+    build_dreaddit_protocol_splits,
     save_processed,
     load_processed,
 )
@@ -15,6 +17,8 @@ __all__ = [
     "prepare_all_datasets",
     "load_dreaddit",
     "load_counseling",
+    "stratified_train_val_split_indices",
+    "build_dreaddit_protocol_splits",
     "save_processed",
     "load_processed",
 ]

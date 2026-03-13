@@ -20,6 +20,20 @@ data:
       domain_id: 1
 
 # ──────────────────────────────────────────
+# Data Quality Gates
+# ──────────────────────────────────────────
+data_quality:
+  enabled: true
+  max_duplicate_ratio: 0.80
+  max_empty_ratio: 0.05
+  deduplicate_clean_text: false
+  allow_single_class_for:
+    - counseling
+  require_binary_labels_for:
+    - dreaddit_train
+    - dreaddit_test
+
+# ──────────────────────────────────────────
 # Preprocessing
 # ──────────────────────────────────────────
 preprocessing:

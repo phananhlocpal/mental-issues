@@ -79,6 +79,76 @@ class DomainDataset:
         )
 
 
+def _quality_cfg(config: dict) -> dict:
+    """Return data-quality settings with safe defaults."""
+    dq = config.get("data_quality", {})
+    return {
+        "enabled": dq.get("enabled", True),
+        "max_duplicate_ratio": float(dq.get("max_duplicate_ratio", 0.80)),
+        "max_empty_ratio": float(dq.get("max_empty_ratio", 0.05)),
+        "deduplicate_clean_text": bool(dq.get("deduplicate_clean_text", False)),
+        "allow_single_class_for": set(dq.get("allow_single_class_for", ["counseling"])),
+        "require_binary_labels_for": set(
+            dq.get("require_binary_labels_for", ["dreaddit_train", "dreaddit_test"])
+        ),
+    }
+
+
+def _validate_and_filter_dataframe(
+    df: pd.DataFrame,
+    dataset_name: str,
+    text_col: str,
+    label_col: str,
+    config: dict,
+) -> pd.DataFrame:
+    """Apply data gates and optional de-duplication to a loaded dataframe."""
+    dq = _quality_cfg(config)
+    if not dq["enabled"]:
+        return df
+
+    work = df.copy()
+    work[text_col] = work[text_col].fillna("").astype(str)
+    work[label_col] = work[label_col].astype(int)
+    work["_clean_text"] = work[text_col].map(clean_text)
+
+    n = max(1, len(work))
+    empty_ratio = float((work["_clean_text"].str.len() == 0).sum()) / n
+    dup_ratio = float(work["_clean_text"].duplicated().sum()) / n
+
+    if empty_ratio > dq["max_empty_ratio"]:
+        raise ValueError(
+            f"[{dataset_name}] empty text ratio {empty_ratio:.2%} exceeds "
+            f"max_empty_ratio={dq['max_empty_ratio']:.2%}"
+        )
+    if dup_ratio > dq["max_duplicate_ratio"]:
+        raise ValueError(
+            f"[{dataset_name}] duplicate clean-text ratio {dup_ratio:.2%} exceeds "
+            f"max_duplicate_ratio={dq['max_duplicate_ratio']:.2%}"
+        )
+
+    labels = set(work[label_col].dropna().astype(int).tolist())
+    if not labels:
+        raise ValueError(f"[{dataset_name}] empty label set after loading")
+
+    if dataset_name in dq["require_binary_labels_for"] and not labels.issubset({0, 1}):
+        raise ValueError(f"[{dataset_name}] expects binary labels {{0,1}} but found {sorted(labels)}")
+
+    if len(labels) < 2 and dataset_name not in dq["allow_single_class_for"]:
+        raise ValueError(
+            f"[{dataset_name}] single-class dataset is not allowed by data_quality policy: "
+            f"labels={sorted(labels)}"
+        )
+
+    if dq["deduplicate_clean_text"]:
+        before = len(work)
+        work = work.drop_duplicates(subset=["_clean_text"], keep="first")
+        after = len(work)
+        if before != after:
+            print(f"[{dataset_name}] deduplicated by clean text: {before} -> {after}")
+
+    return work.drop(columns=["_clean_text"])
+
+
 def load_dreaddit(config: dict, split: str = "train") -> DomainDataset:
     """Load Dreaddit dataset from local CSV."""
     raw_dir = _resolve_path(config["data"]["raw_dir"])
@@ -87,6 +157,13 @@ def load_dreaddit(config: dict, split: str = "train") -> DomainDataset:
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV not found: {csv_path}")
     df = pd.read_csv(csv_path)
+    df = _validate_and_filter_dataframe(
+        df=df,
+        dataset_name=f"dreaddit_{split}",
+        text_col="text",
+        label_col="label",
+        config=config,
+    )
     texts  = [str(t) for t in df["text"].tolist()]
     labels = [int(l) for l in df["label"].tolist()]
     return _preprocess_domain(texts, labels, domain_id=0, config=config)
@@ -100,15 +177,82 @@ def load_counseling(config: dict, max_samples: Optional[int] = None) -> DomainDa
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV not found: {csv_path}")
     df = pd.read_csv(csv_path)
-    # Expect a 'text' column; fall back to first column
-    text_col = "text" if "text" in df.columns else df.columns[0]
+    text_col = "text" if "text" in df.columns else ("context" if "context" in df.columns else None)
     label_col = "label" if "label" in df.columns else None
+    if text_col is None:
+        raise ValueError("[counseling] missing required text column ('text' or 'context')")
+    if label_col is None:
+        raise ValueError("[counseling] missing required 'label' column")
+
+    df = _validate_and_filter_dataframe(
+        df=df,
+        dataset_name="counseling",
+        text_col=text_col,
+        label_col=label_col,
+        config=config,
+    )
     texts  = [str(t) for t in df[text_col].tolist()]
-    labels = [int(l) for l in df[label_col].tolist()] if label_col else [1] * len(texts)
+    labels = [int(l) for l in df[label_col].tolist()]
     if max_samples:
         texts  = texts[:max_samples]
         labels = labels[:max_samples]
     return _preprocess_domain(texts, labels, domain_id=1, config=config)
+
+
+def stratified_train_val_split_indices(
+    labels: list[int] | np.ndarray,
+    val_ratio: float = 0.1,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Create a deterministic stratified train/val split from label array."""
+    y = np.asarray(labels)
+    if y.ndim != 1:
+        raise ValueError("labels must be 1-D")
+    if not (0.0 < val_ratio < 1.0):
+        raise ValueError("val_ratio must be in (0, 1)")
+
+    rng = np.random.default_rng(seed)
+    train_chunks: list[np.ndarray] = []
+    val_chunks: list[np.ndarray] = []
+
+    for c in np.unique(y):
+        cls_idx = np.where(y == c)[0]
+        rng.shuffle(cls_idx)
+        n_val = max(1, int(round(len(cls_idx) * val_ratio)))
+        if n_val >= len(cls_idx):
+            n_val = max(1, len(cls_idx) - 1)
+        val_chunks.append(cls_idx[:n_val])
+        train_chunks.append(cls_idx[n_val:])
+
+    train_idx = np.concatenate(train_chunks) if train_chunks else np.array([], dtype=int)
+    val_idx = np.concatenate(val_chunks) if val_chunks else np.array([], dtype=int)
+    rng.shuffle(train_idx)
+    rng.shuffle(val_idx)
+    return train_idx.astype(int), val_idx.astype(int)
+
+
+def build_dreaddit_protocol_splits(
+    datasets: dict[str, DomainDataset],
+    val_ratio: float = 0.1,
+    seed: int = 42,
+) -> dict[str, np.ndarray]:
+    """Protocol split: train/val from dreaddit_train, test from dreaddit_test."""
+    if "dreaddit_train" not in datasets or "dreaddit_test" not in datasets:
+        raise KeyError("datasets must include both 'dreaddit_train' and 'dreaddit_test'")
+
+    train_ds = datasets["dreaddit_train"]
+    test_ds = datasets["dreaddit_test"]
+    tr_idx, va_idx = stratified_train_val_split_indices(
+        labels=train_ds.labels,
+        val_ratio=val_ratio,
+        seed=seed,
+    )
+    te_idx = np.arange(len(test_ds), dtype=int)
+    return {
+        "train_idx": tr_idx,
+        "val_idx": va_idx,
+        "test_idx": te_idx,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
