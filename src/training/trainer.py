@@ -39,8 +39,11 @@ class DomainAdversarialLoss(nn.Module):
         total = cls_loss
         dom_loss = torch.tensor(0.0, device=cls_logits.device)
         if domain_logits is not None and domain_labels is not None:
-            dom_loss = self.dom_loss_fn(domain_logits, domain_labels)
-            total = cls_loss + self.lam * dom_loss
+            # Domain adversarial signal is meaningful only when at least two domains
+            # are present in the batch.
+            if domain_labels.unique().numel() > 1:
+                dom_loss = self.dom_loss_fn(domain_logits, domain_labels)
+                total = cls_loss + self.lam * dom_loss
         return {"total": total, "cls": cls_loss, "domain": dom_loss}
 
 
@@ -68,12 +71,14 @@ class GNNTrainer:
         self.lam = tcfg["domain_lambda"]
         self.patience = tcfg["early_stopping_patience"]
         self.lr = tcfg["learning_rate"]
+        self.use_full_graph_single_pass = tcfg.get("use_full_graph_single_pass", True)
 
         self.optimizer = optim.Adam(model.parameters(), lr=self.lr)
         self.loss_fn = DomainAdversarialLoss(lam=self.lam)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode="max", patience=5, factor=0.5
         )
+        self.use_class_weight = tcfg.get("use_class_weight", True)
 
         ckpt_dir = Path(config["experiments"]["checkpoint_dir"])
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -84,6 +89,27 @@ class GNNTrainer:
         self.log_path = log_dir / f"{run_name}_log.json"
 
         self.history: list[dict] = []
+
+    # ------------------------------------------------------------------
+    def _configure_classification_loss(self, train_labels: torch.Tensor) -> None:
+        """Optionally set class-weighted CE loss from train-label distribution."""
+        if not self.use_class_weight:
+            self.loss_fn.cls_loss_fn = nn.CrossEntropyLoss()
+            return
+
+        if train_labels.numel() == 0:
+            self.loss_fn.cls_loss_fn = nn.CrossEntropyLoss()
+            return
+
+        counts = torch.bincount(train_labels.long().cpu(), minlength=2).float()
+        if (counts <= 0).any():
+            # Avoid unstable weights when a class is absent.
+            self.loss_fn.cls_loss_fn = nn.CrossEntropyLoss()
+            return
+
+        total = counts.sum()
+        weights = total / (counts.numel() * counts)
+        self.loss_fn.cls_loss_fn = nn.CrossEntropyLoss(weight=weights.to(self.device))
 
     # ------------------------------------------------------------------
     def _forward_batch(
@@ -126,8 +152,33 @@ class GNNTrainer:
     ) -> dict[str, float]:
         self.model.train()
         alpha = self._alpha(epoch)
+
+        if self.use_full_graph_single_pass:
+            batch_doc_idx = train_indices.to(self.device)
+            batch_labels = labels[train_indices.cpu()].to(self.device)
+            batch_domain = domain_labels[train_indices.cpu()].to(self.device)
+
+            self.optimizer.zero_grad()
+            result = self._forward_batch(
+                pyg_data, batch_doc_idx, batch_labels, batch_domain, alpha
+            )
+            result["losses"]["total"].backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.optimizer.step()
+
+            preds = result["logits"].argmax(dim=-1)
+            correct = (preds == batch_labels).sum().item()
+            n = len(train_indices)
+            return {
+                "loss": float(result["losses"]["total"].item()),
+                "cls_loss": float(result["losses"]["cls"].item()),
+                "dom_loss": float(result["losses"]["domain"].item()),
+                "acc": correct / max(1, n),
+            }
+
         total_loss = cls_loss = dom_loss = 0.0
         correct = 0
+        n_batches = 0
 
         perm = torch.randperm(len(train_indices))
         for start in range(0, len(train_indices), batch_size):
@@ -149,14 +200,124 @@ class GNNTrainer:
             dom_loss += result["losses"]["domain"].item()
             preds = result["logits"].argmax(dim=-1)
             correct += (preds == batch_labels).sum().item()
+            n_batches += 1
 
-        n_batches = max(1, len(train_indices) // batch_size)
+        n_batches = max(1, n_batches)
         n = len(train_indices)
         return {
             "loss": total_loss / n_batches,
             "cls_loss": cls_loss / n_batches,
             "dom_loss": dom_loss / n_batches,
             "acc": correct / n,
+        }
+
+    # ------------------------------------------------------------------
+    def train_epoch_domain_adversarial(
+        self,
+        pyg_data,
+        source_indices: torch.Tensor,
+        target_indices: torch.Tensor,
+        labels: torch.Tensor,
+        domain_labels: torch.Tensor,
+        batch_size: int,
+        epoch: int,
+    ) -> dict[str, float]:
+        """Train one epoch with source-labeled + target-unlabeled batches.
+
+        - Classification loss is computed on source samples only.
+        - Domain loss is computed on both source and target samples.
+        """
+        if len(target_indices) == 0:
+            return self.train_epoch(
+                pyg_data,
+                source_indices,
+                labels,
+                domain_labels,
+                batch_size,
+                epoch,
+            )
+
+        self.model.train()
+        alpha = self._alpha(epoch)
+
+        total_loss = cls_loss_total = dom_loss_total = 0.0
+        correct = 0
+        n_steps = 0
+
+        # Use enough steps to sweep through the larger side once.
+        steps_src = (len(source_indices) + batch_size - 1) // batch_size
+        steps_tgt = (len(target_indices) + batch_size - 1) // batch_size
+        steps = max(1, steps_src, steps_tgt)
+
+        src_perm = torch.randperm(len(source_indices))
+        tgt_perm = torch.randperm(len(target_indices))
+
+        for step in range(steps):
+            s0 = (step * batch_size) % len(source_indices)
+            t0 = (step * batch_size) % len(target_indices)
+
+            src_rel = src_perm[s0 : s0 + batch_size]
+            tgt_rel = tgt_perm[t0 : t0 + batch_size]
+            if len(src_rel) == 0:
+                continue
+            if len(tgt_rel) == 0:
+                tgt_rel = tgt_perm[: min(batch_size, len(tgt_perm))]
+
+            src_idx = source_indices[src_rel].to(self.device)
+            tgt_idx = target_indices[tgt_rel].to(self.device)
+
+            src_labels = labels[src_idx.cpu()].to(self.device)
+            src_domain = domain_labels[src_idx.cpu()].to(self.device)
+            tgt_domain = domain_labels[tgt_idx.cpu()].to(self.device)
+
+            self.optimizer.zero_grad()
+
+            out_src = self.model(
+                x_dict=pyg_data.x_dict,
+                edge_index_dict=pyg_data.edge_index_dict,
+                doc_indices=src_idx,
+                alpha=alpha,
+            )
+            out_tgt = self.model(
+                x_dict=pyg_data.x_dict,
+                edge_index_dict=pyg_data.edge_index_dict,
+                doc_indices=tgt_idx,
+                alpha=alpha,
+            )
+
+            cls_loss = self.loss_fn.cls_loss_fn(out_src["logits"], src_labels)
+
+            dom_loss = torch.tensor(0.0, device=self.device)
+            if (
+                out_src.get("domain_logits") is not None
+                and out_tgt.get("domain_logits") is not None
+            ):
+                dom_logits = torch.cat(
+                    [out_src["domain_logits"], out_tgt["domain_logits"]], dim=0
+                )
+                dom_targets = torch.cat([src_domain, tgt_domain], dim=0)
+                if dom_targets.unique().numel() > 1:
+                    dom_loss = self.loss_fn.dom_loss_fn(dom_logits, dom_targets)
+
+            total = cls_loss + self.lam * dom_loss
+            total.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.optimizer.step()
+
+            preds = out_src["logits"].argmax(dim=-1)
+            correct += (preds == src_labels).sum().item()
+
+            total_loss += total.item()
+            cls_loss_total += cls_loss.item()
+            dom_loss_total += dom_loss.item()
+            n_steps += 1
+
+        n_steps = max(1, n_steps)
+        return {
+            "loss": total_loss / n_steps,
+            "cls_loss": cls_loss_total / n_steps,
+            "dom_loss": dom_loss_total / n_steps,
+            "acc": correct / max(1, len(source_indices)),
         }
 
     # ------------------------------------------------------------------
@@ -170,9 +331,35 @@ class GNNTrainer:
         batch_size: int,
     ) -> dict[str, float]:
         self.model.eval()
+
+        if self.use_full_graph_single_pass:
+            batch_doc_idx = eval_indices.to(self.device)
+            batch_labels = labels[eval_indices.cpu()].to(self.device)
+
+            out = self.model(
+                x_dict=pyg_data.x_dict,
+                edge_index_dict=pyg_data.edge_index_dict,
+                doc_indices=batch_doc_idx,
+                alpha=0.0,
+            )
+            losses = self.loss_fn(out["logits"], batch_labels)
+            preds = out["logits"].argmax(dim=-1).cpu().tolist()
+            y_true = batch_labels.cpu().tolist()
+
+            from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+
+            return {
+                "loss": float(losses["total"].item()),
+                "accuracy": accuracy_score(y_true, preds),
+                "f1": f1_score(y_true, preds, average="binary", zero_division=0),
+                "precision": precision_score(y_true, preds, average="binary", zero_division=0),
+                "recall": recall_score(y_true, preds, average="binary", zero_division=0),
+            }
+
         all_preds: list[int] = []
         all_labels: list[int] = []
         total_loss = 0.0
+        n_batches = 0
 
         for start in range(0, len(eval_indices), batch_size):
             batch_doc_idx = eval_indices[start : start + batch_size].to(self.device)
@@ -190,6 +377,7 @@ class GNNTrainer:
             preds = out["logits"].argmax(dim=-1).cpu().tolist()
             all_preds.extend(preds)
             all_labels.extend(batch_labels.cpu().tolist())
+            n_batches += 1
 
         from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
@@ -198,7 +386,7 @@ class GNNTrainer:
         prec = precision_score(all_labels, all_preds, average="binary", zero_division=0)
         rec = recall_score(all_labels, all_preds, average="binary", zero_division=0)
 
-        n_batches = max(1, len(eval_indices) // batch_size)
+        n_batches = max(1, n_batches)
         return {
             "loss": total_loss / n_batches,
             "accuracy": acc,
@@ -217,6 +405,8 @@ class GNNTrainer:
         domain_labels: torch.Tensor,
     ) -> list[dict]:
         batch_size = self.cfg["training"]["batch_size"]
+        train_labels = labels[train_indices.cpu()]
+        self._configure_classification_loss(train_labels)
         best_f1 = 0.0
         no_improve = 0
 
@@ -263,6 +453,82 @@ class GNNTrainer:
                     break
 
         # Save log
+        with open(self.log_path, "w") as f:
+            json.dump(self.history, f, indent=2)
+        print(f"  Training log → {self.log_path}")
+        return self.history
+
+    # ------------------------------------------------------------------
+    def fit_domain_adversarial(
+        self,
+        pyg_data,
+        source_train_indices: torch.Tensor,
+        source_val_indices: torch.Tensor,
+        target_train_indices: torch.Tensor,
+        labels: torch.Tensor,
+        domain_labels: torch.Tensor,
+    ) -> list[dict]:
+        """Fit with unsupervised domain adaptation.
+
+        Source labels are used for classification; target labels are not used.
+        """
+        batch_size = self.cfg["training"]["batch_size"]
+        train_labels = labels[source_train_indices.cpu()]
+        self._configure_classification_loss(train_labels)
+        best_f1 = 0.0
+        no_improve = 0
+
+        for epoch in range(1, self.epochs + 1):
+            t0 = time.time()
+            train_stats = self.train_epoch_domain_adversarial(
+                pyg_data,
+                source_indices=source_train_indices,
+                target_indices=target_train_indices,
+                labels=labels,
+                domain_labels=domain_labels,
+                batch_size=batch_size,
+                epoch=epoch,
+            )
+            val_stats = self.evaluate(
+                pyg_data, source_val_indices, labels, domain_labels, batch_size
+            )
+            self.scheduler.step(val_stats["f1"])
+
+            elapsed = time.time() - t0
+            row = {
+                "epoch": epoch,
+                "train_loss": round(train_stats["loss"], 4),
+                "train_cls_loss": round(train_stats["cls_loss"], 4),
+                "train_dom_loss": round(train_stats["dom_loss"], 4),
+                "train_acc": round(train_stats["acc"], 4),
+                "val_loss": round(val_stats["loss"], 4),
+                "val_acc": round(val_stats["accuracy"], 4),
+                "val_f1": round(val_stats["f1"], 4),
+                "val_precision": round(val_stats["precision"], 4),
+                "val_recall": round(val_stats["recall"], 4),
+                "elapsed_s": round(elapsed, 2),
+            }
+            self.history.append(row)
+
+            print(
+                f"  Epoch {epoch:3d}/{self.epochs} | "
+                f"loss={train_stats['loss']:.4f} | "
+                f"cls={train_stats['cls_loss']:.4f} | "
+                f"dom={train_stats['dom_loss']:.4f} | "
+                f"val_f1={val_stats['f1']:.4f} | "
+                f"{elapsed:.1f}s"
+            )
+
+            if val_stats["f1"] > best_f1:
+                best_f1 = val_stats["f1"]
+                no_improve = 0
+                torch.save(self.model.state_dict(), self.ckpt_path)
+            else:
+                no_improve += 1
+                if no_improve >= self.patience:
+                    print(f"  Early stopping at epoch {epoch}.")
+                    break
+
         with open(self.log_path, "w") as f:
             json.dump(self.history, f, indent=2)
         print(f"  Training log → {self.log_path}")

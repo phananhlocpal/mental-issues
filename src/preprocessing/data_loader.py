@@ -203,6 +203,7 @@ def load_processed(path: str | Path) -> DomainDataset:
 def prepare_all_datasets(config: dict, force: bool = False) -> dict[str, DomainDataset]:
     """Load and preprocess all configured datasets, with disk caching."""
     proc_dir = _resolve_path(config["data"]["processed_dir"])
+    raw_dir = _resolve_path(config["data"]["raw_dir"])
     result: dict[str, DomainDataset] = {}
 
     cache_dreaddit_train = proc_dir / "dreaddit_train.pkl"
@@ -225,9 +226,32 @@ def prepare_all_datasets(config: dict, force: bool = False) -> dict[str, DomainD
 
     if not force and cache_counseling.exists():
         print("[Cache] Loading Counseling from disk …")
-        result["counseling"] = load_processed(cache_counseling)
+        cached = load_processed(cache_counseling)
+
+        # Backward-compat: older pipeline cached only first 2000 samples.
+        # If cache is truncated, rebuild full counseling dataset automatically.
+        counseling_csv = raw_dir / "counseling.csv"
+        refresh_needed = False
+        if counseling_csv.exists():
+            try:
+                n_raw = len(pd.read_csv(counseling_csv))
+                if len(cached) < n_raw:
+                    refresh_needed = True
+                    print(
+                        f"[Cache] Counseling cache appears truncated "
+                        f"({len(cached)}/{n_raw}); rebuilding full dataset …"
+                    )
+            except Exception:
+                # If row count check fails, keep cache for robustness.
+                pass
+
+        if refresh_needed:
+            result["counseling"] = load_counseling(config, max_samples=None)
+            save_processed(result["counseling"], cache_counseling)
+        else:
+            result["counseling"] = cached
     else:
-        result["counseling"] = load_counseling(config, max_samples=2000)
+        result["counseling"] = load_counseling(config, max_samples=None)
         save_processed(result["counseling"], cache_counseling)
 
     return result

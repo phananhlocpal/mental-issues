@@ -168,18 +168,36 @@ class HeteroGraphBuilder:
                     cooc[key] += 1
 
         for (wi, wj), cnt in cooc.items():
+            # Add both directions so directed message passing remains symmetric.
             g.word_word_edges.append((wi, wj, float(cnt)))
+            g.word_word_edges.append((wj, wi, float(cnt)))
 
         # ── 5. Word-concept edges ────────────────────────────────────────
         print("[Graph] Building word-concept edges …")
-        for surface, (concept, _) in LEXICON.items():
-            # Match surface word tokens to vocab
-            surface_tokens = surface.split()
-            for tok in surface_tokens:
-                if tok in vocab:
-                    wi = vocab[tok]
-                    ci = g.concept_vocab[concept]
-                    g.word_concept_edges.append((wi, ci, 1.0))
+        wc_edges: set[tuple[int, int]] = set()
+
+        # Prefer corpus-driven extraction so graph edges reflect observed entities.
+        extraction_results = self.extractor.extract_batch(all_clean_texts)
+        for res in extraction_results:
+            for ent in res.entities:
+                if ent.concept not in g.concept_vocab:
+                    continue
+                ci = g.concept_vocab[ent.concept]
+                for tok in ent.surface.split():
+                    if tok in vocab:
+                        wc_edges.add((vocab[tok], ci))
+
+        # Fallback to lexicon priors if extraction is sparse.
+        if not wc_edges:
+            for surface, (concept, _) in LEXICON.items():
+                if concept not in g.concept_vocab:
+                    continue
+                ci = g.concept_vocab[concept]
+                for tok in surface.split():
+                    if tok in vocab:
+                        wc_edges.add((vocab[tok], ci))
+
+        g.word_concept_edges = [(wi, ci, 1.0) for wi, ci in sorted(wc_edges)]
 
         # ── 6. Concept-category edges ────────────────────────────────────
         print("[Graph] Building concept-category edges …")

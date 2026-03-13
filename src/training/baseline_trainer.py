@@ -102,6 +102,7 @@ class EmbeddingTrainer:
         self.model.train(train)
         total_loss = correct = 0
         perm = torch.randperm(len(indices)) if train else torch.arange(len(indices))
+        n_batches = 0
 
         for start in range(0, len(perm), self.batch_size):
             batch_rel = perm[start : start + self.batch_size]
@@ -121,8 +122,9 @@ class EmbeddingTrainer:
 
             total_loss += loss.item()
             correct += (logits.argmax(-1) == batch_lbl).sum().item()
+            n_batches += 1
 
-        n_batches = max(1, len(indices) // self.batch_size)
+        n_batches = max(1, n_batches)
         return total_loss / n_batches, correct / len(indices)
 
     # ------------------------------------------------------------------

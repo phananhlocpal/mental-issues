@@ -116,6 +116,8 @@ model:
 training:
   learning_rate: 0.001
   batch_size: 32
+  use_full_graph_single_pass: true
+  use_class_weight: true
   epochs: 50
   domain_lambda: 0.1        # weight for domain adversarial loss
   early_stopping_patience: 10

@@ -140,15 +140,15 @@ def build_node_features(
     cfg_pre = config["preprocessing"]
 
     # ── Document features (SciBERT) ────────────────────────────────────
-    all_clean_texts: list[str] = []
+    all_raw_texts: list[str] = []
     for ds in datasets:
-        all_clean_texts.extend(ds.clean_texts)
+        all_raw_texts.extend(ds.texts)
 
     doc_embedder = DocumentEmbedder(
         model_name=cfg_pre.get("scibert_model", "allenai/scibert_scivocab_uncased"),
         device=device,
     )
-    doc_feats = doc_embedder.embed(all_clean_texts)  # (N_docs, 768)
+    doc_feats = doc_embedder.embed(all_raw_texts)  # (N_docs, 768)
 
     # ── Word features (GloVe) ──────────────────────────────────────────
     glove_path = cfg_pre.get("glove_path", None)
